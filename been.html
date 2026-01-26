@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urlaubstracker</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background-color: #121212;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    #map {
+      height: 500px;
+      width: 100%;
+      max-width: 1000px;
+      z-index: 1;
+    }
+    .form {
+      margin: 20px;
+      background-color: #1e1e1e;
+      padding: 20px;
+      border-radius: 10px;
+      max-width: 500px;
+      z-index: 2;
+    }
+    .form label, .form select, .form input {
+      display: block;
+      margin: 10px 0;
+      width: 100%;
+    }
+    .history {
+      width: 90%;
+      max-width: 1000px;
+      margin-top: 30px;
+    }
+    .entry {
+      background-color: #1e1e1e;
+      margin-bottom: 10px;
+      padding: 10px;
+      border-radius: 5px;
+      position: relative;
+    }
+    .delete-button, .edit-button {
+      position: absolute;
+      top: 10px;
+      background-color: #3f88cf;
+      border: none;
+      color: white;
+      padding: 5px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    .delete-button {
+      right: 10px;
+      background-color: #cf3f3f;
+    }
+    .edit-button {
+      right: 80px;
+    }
+    .loading {
+      color: #aaa;
+      font-style: italic;
+    }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+</head>
+<body>
+  <h1>Urlaubstracker</h1>
+  <div id="map"></div>
+
+  <div class="form">
+    <label for="country">Land:</label>
+    <select id="country">
+      <option value="">Bitte wählen</option>
+    </select>
+
+    <label for="transport">Transportmittel:</label>
+    <select id="transport">
+      <option value="">Bitte wählen</option>
+      <option value="Flugzeug">Flugzeug</option>
+      <option value="Auto">Auto</option>
+      <option value="Zug">Zug</option>
+      <option value="Bus">Bus</option>
+    </select>
+
+    <div id="flight-info" style="display: none;">
+      <label for="from">Von Flughafen:</label>
+      <input type="text" id="from" placeholder="z.B. Frankfurt (FRA)" />
+      <label for="to">Zu Flughafen:</label>
+      <input type="text" id="to" placeholder="z.B. Bangkok (BKK)" />
+    </div>
+
+    <label for="accommodation">Unterkunft:</label>
+    <input type="text" id="accommodation" placeholder="z.B. Hotel XY, Airbnb, etc." />
+
+    <label for="start">Von:</label>
+    <input type="date" id="start" />
+    <label for="end">Bis:</label>
+    <input type="date" id="end" />
+
+    <button onclick="addTrip()">Eintragen</button>
+  </div>
+
+  <div class="history" id="history">
+    <h2>Reisehistorie</h2>
+    <p class="loading">Lade Daten...</p>
+  </div>
+
+  <script>
+    // Firebase Konfiguration - Ersetze mit deinen eigenen Daten!
+    const firebaseConfig = {
+      apiKey: "AIzaSyABC123...", // Ersetzen
+      authDomain: "dein-projekt.firebaseapp.com", // Ersetzen
+      databaseURL: "https://dein-projekt.firebaseio.com", // Ersetzen
+      projectId: "dein-projekt", // Ersetzen
+      storageBucket: "dein-projekt.appspot.com", // Ersetzen
+      messagingSenderId: "1234567890", // Ersetzen
+      appId: "1:1234567890:web:abc123..." // Ersetzen
+    };
+
+    // Firebase initialisieren
+    firebase.initializeApp(firebaseConfig);
+    const database = firebase.database();
+
+    let visitedCountries = {};
+    let tripHistory = [];
+    let geoJsonLayer;
+    let allCountries = [];
+    let editingIndex = -1;
+
+    const map = L.map('map', {
+      zoomControl: false,
+      dragging: false,
+      scrollWheelZoom: false,
+      doubleClickZoom: false,
+      boxZoom: false,
+      keyboard: false,
+      tap: false,
+      touchZoom: false,
+    }).setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '',
+    }).addTo(map);
+
+    // Daten von Firebase laden
+    function loadData() {
+      database.ref('trips').on('value', (snapshot) => {
+        const data = snapshot.val() || {};
+        tripHistory = data.tripHistory || [];
+        visitedCountries = data.visitedCountries || {};
+        
+        updateMap();
+        renderHistory();
+        document.querySelector('.loading').style.display = 'none';
+      });
+    }
+
+    // Daten zu Firebase speichern
+    function saveData() {
+      database.ref('trips').set({
+        tripHistory,
+        visitedCountries
+      });
+    }
+
+    fetch('https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json')
+      .then(res => res.json())
+      .then(data => {
+        allCountries = data.features;
+        geoJsonLayer = L.geoJSON(data, {
+          style: feature => ({
+            fillColor: visitedCountries[feature.properties.name] ? '#3fcf3f' : '#2a2a2a',
+            weight: 1,
+            color: '#666',
+            fillOpacity: 0.7
+          })
+        }).addTo(map);
+
+        // Fülle das Dropdown mit Ländernamen
+        const countrySelect = document.getElementById('country');
+        allCountries.map(c => c.properties.name).sort().forEach(name => {
+          const option = document.createElement('option');
+          option.value = name;
+          option.textContent = name;
+          countrySelect.appendChild(option);
+        });
+
+        updateMap();
+      });
+
+    function updateMap() {
+      if (geoJsonLayer) {
+        geoJsonLayer.eachLayer(layer => {
+          const name = layer.feature.properties.name;
+          layer.setStyle({ fillColor: visitedCountries[name] ? '#3fcf3f' : '#2a2a2a' });
+        });
+      }
+    }
+
+    function renderHistory() {
+      const historyDiv = document.getElementById('history');
+      historyDiv.innerHTML = '<h2>Reisehistorie</h2>';
+      
+      if (tripHistory.length === 0) {
+        historyDiv.innerHTML += '<p>Noch keine Reisen eingetragen</p>';
+        return;
+      }
+      
+      const sortedHistory = [...tripHistory].sort((a, b) => new Date(b.start) - new Date(a.start));
+      sortedHistory.forEach((entryData, i) => {
+        const actualIndex = tripHistory.indexOf(entryData);
+        const entry = document.createElement('div');
+        entry.className = 'entry';
+        entry.innerHTML = `
+          <button class="delete-button" onclick="deleteTrip(${actualIndex})">Löschen</button>
+          <button class="edit-button" onclick="editTrip(${actualIndex})">Bearbeiten</button>
+          <strong>Land:</strong> ${entryData.country}<br>
+          <strong>Transport:</strong> ${entryData.transport}<br>
+          ${entryData.transport === 'Flugzeug' ? `<strong>Flughäfen:</strong> ${entryData.from} ➔ ${entryData.to}<br>` : ''}
+          <strong>Unterkunft:</strong> ${entryData.accommodation}<br>
+          <strong>Zeitraum:</strong> ${entryData.start} bis ${entryData.end}
+        `;
+        historyDiv.appendChild(entry);
+      });
+    }
+
+    function deleteTrip(index) {
+      const removed = tripHistory.splice(index, 1)[0];
+      const stillVisited = tripHistory.some(t => t.country === removed.country);
+      if (!stillVisited) {
+        delete visitedCountries[removed.country];
+      }
+      saveData();
+      updateMap();
+      renderHistory();
+    }
+
+    function editTrip(index) {
+      const trip = tripHistory[index];
+      document.getElementById('country').value = trip.country;
+      document.getElementById('transport').value = trip.transport;
+      document.getElementById('from').value = trip.from || '';
+      document.getElementById('to').value = trip.to || '';
+      document.getElementById('accommodation').value = trip.accommodation;
+      document.getElementById('start').value = trip.start;
+      document.getElementById('end').value = trip.end;
+      document.getElementById('flight-info').style.display = trip.transport === 'Flugzeug' ? 'block' : 'none';
+      editingIndex = index;
+    }
+
+    function addTrip() {
+      const country = document.getElementById('country').value;
+      const transport = document.getElementById('transport').value;
+      const from = document.getElementById('from').value;
+      const to = document.getElementById('to').value;
+      const accommodation = document.getElementById('accommodation').value;
+      const start = document.getElementById('start').value;
+      const end = document.getElementById('end').value;
+
+      if (!country || !transport || !start || !end) {
+        alert('Bitte fülle alle erforderlichen Felder aus!');
+        return;
+      }
+
+      visitedCountries[country] = true;
+      const tripData = { 
+        country, 
+        transport, 
+        from: transport === 'Flugzeug' ? from : '', 
+        to: transport === 'Flugzeug' ? to : '', 
+        accommodation, 
+        start, 
+        end 
+      };
+
+      if (editingIndex >= 0) {
+        tripHistory[editingIndex] = tripData;
+        editingIndex = -1;
+      } else {
+        tripHistory.push(tripData);
+      }
+
+      saveData();
+
+      document.querySelector('.form').reset();
+      document.getElementById('flight-info').style.display = 'none';
+
+      updateMap();
+      renderHistory();
+    }
+
+    document.getElementById('transport').addEventListener('change', (e) => {
+      const showFlight = e.target.value === 'Flugzeug';
+      document.getElementById('flight-info').style.display = showFlight ? 'block' : 'none';
+    });
+
+    // Initialen Datenabruf starten
+    loadData();
+  </script>
+</body>
+</html>
